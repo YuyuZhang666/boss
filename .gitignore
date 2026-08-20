@@ -1,0 +1,10 @@
+/.worktrees/
+/.superpowers/
+/library/
+/temp/
+/local/
+/build/
+/node_modules/
+*.log
+.DS_Store
+Thumbs.db
