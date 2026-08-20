@@ -1,0 +1,12 @@
+{
+  "name": "boss-game-cocos-scaffold",
+  "private": true,
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify:wechat": "node scripts/verify-wechat-build.mjs build/wechatgame"
+  },
+  "devDependencies": {
+    "vitest": "3.2.4"
+  }
+}
