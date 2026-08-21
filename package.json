@@ -8,5 +8,9 @@
   },
   "devDependencies": {
     "vitest": "3.2.4"
-  }
+  },
+  "creator": {
+    "version": "3.8.8"
+  },
+  "uuid": "bf203fa6-2a49-481c-b9b4-e31704dc3b7d"
 }
