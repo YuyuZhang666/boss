@@ -1,0 +1,17 @@
+{
+  "platform": "wechatgame",
+  "buildPath": "project://build",
+  "outputName": "wechatgame",
+  "taskName": "wechatgame",
+  "orientation": "portrait",
+  "debug": false,
+  "packages": {
+    "wechatgame": {
+      "orientation": "portrait",
+      "appid": "wx79a1c555206206f6",
+      "buildOpenDataContextTemplate": "",
+      "separateEngine": false,
+      "highPerformanceMode": false
+    }
+  }
+}
