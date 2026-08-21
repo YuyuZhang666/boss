@@ -60,79 +60,146 @@ function isPrimitiveNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
-function hasOnlyKeys(value: object, allowed: readonly string[]): boolean {
-  const allowedSet = new Set(allowed);
-  return Reflect.ownKeys(value).every(
-    (key) => typeof key === 'string' && allowedSet.has(key),
-  );
-}
-
 function invalidDefinition(): never {
   throw new Error('invalid event definition');
 }
 
-function cloneEffect(value: unknown): EventEffect {
-  if (!isRecord(value) || typeof value.type !== 'string') invalidDefinition();
+function readOwnDataRecord(
+  value: unknown,
+  allowedKeys: readonly string[],
+  requiredKeys: readonly string[],
+  invalid: () => never,
+): Readonly<Record<string, unknown>> {
+  if (!isRecord(value)) invalid();
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const descriptorKeys = Reflect.ownKeys(descriptors);
+  const allowed = new Set(allowedKeys);
+  if (
+    descriptorKeys.some((key) => typeof key !== 'string' || !allowed.has(key))
+    || requiredKeys.some((key) => !Object.prototype.hasOwnProperty.call(descriptors, key))
+  ) invalid();
 
-  if (value.type === 'request-task-offer') {
+  const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const key of descriptorKeys) {
+    if (typeof key !== 'string') invalid();
+    const descriptor = descriptors[key];
+    if (!Object.prototype.hasOwnProperty.call(descriptor, 'value')) invalid();
+    result[key] = descriptor.value;
+  }
+  return result;
+}
+
+function readOwnDataArray(value: unknown, invalid: () => never): readonly unknown[] {
+  if (!Array.isArray(value)) invalid();
+  const descriptors = Object.getOwnPropertyDescriptors(value) as unknown as Record<
+    PropertyKey,
+    PropertyDescriptor
+  >;
+  const lengthDescriptor = descriptors.length;
+  if (
+    lengthDescriptor === undefined
+    || !Object.prototype.hasOwnProperty.call(lengthDescriptor, 'value')
+    || !Number.isSafeInteger(lengthDescriptor.value)
+    || lengthDescriptor.value < 0
+  ) invalid();
+  const length = lengthDescriptor.value as number;
+  const descriptorKeys = Reflect.ownKeys(descriptors);
+  if (descriptorKeys.some((key) => {
+    if (key === 'length') return false;
+    if (typeof key !== 'string') return true;
+    const index = Number(key);
+    return !Number.isSafeInteger(index) || index < 0 || index >= length || String(index) !== key;
+  })) invalid();
+
+  const result: unknown[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = descriptors[String(index)];
     if (
-      !hasOnlyKeys(value, ['type', 'definitionId'])
-      || !isPrimitiveNonEmptyString(value.definitionId)
+      descriptor === undefined
+      || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+    ) invalid();
+    result.push(descriptor.value);
+  }
+  return result;
+}
+
+function cloneEffect(value: unknown): EventEffect {
+  const candidate = readOwnDataRecord(
+    value,
+    ['type', 'multiplier', 'minMinuteOfDay', 'definitionId'],
+    ['type'],
+    invalidDefinition,
+  );
+  if (typeof candidate.type !== 'string') invalidDefinition();
+
+  if (candidate.type === 'request-task-offer') {
+    if (
+      Reflect.ownKeys(candidate).some((key) => key !== 'type' && key !== 'definitionId')
+      || !isPrimitiveNonEmptyString(candidate.definitionId)
     ) invalidDefinition();
-    return Object.freeze({ type: value.type, definitionId: value.definitionId });
+    return Object.freeze({ type: candidate.type, definitionId: candidate.definitionId });
   }
 
   if (
-    value.type !== 'boss-work-speed'
-    && value.type !== 'employee-work-speed'
-    && value.type !== 'avoidance-chance'
-    && value.type !== 'trust-gain'
+    candidate.type !== 'boss-work-speed'
+    && candidate.type !== 'employee-work-speed'
+    && candidate.type !== 'avoidance-chance'
+    && candidate.type !== 'trust-gain'
   ) invalidDefinition();
   if (
-    typeof value.multiplier !== 'number'
-    || !Number.isFinite(value.multiplier)
-    || value.multiplier < 0
+    typeof candidate.multiplier !== 'number'
+    || !Number.isFinite(candidate.multiplier)
+    || candidate.multiplier < 0
   ) invalidDefinition();
 
-  if (value.type === 'avoidance-chance') {
-    if (!hasOnlyKeys(value, ['type', 'multiplier', 'minMinuteOfDay'])) invalidDefinition();
-    const minMinuteOfDay = value.minMinuteOfDay;
+  if (candidate.type === 'avoidance-chance') {
+    if (Reflect.ownKeys(candidate).some(
+      (key) => key !== 'type' && key !== 'multiplier' && key !== 'minMinuteOfDay',
+    )) invalidDefinition();
+    const minMinuteOfDay = candidate.minMinuteOfDay;
     if (
       minMinuteOfDay !== undefined
       && (!Number.isSafeInteger(minMinuteOfDay) || (minMinuteOfDay as number) < 0 || (minMinuteOfDay as number) > 1_440)
     ) invalidDefinition();
     return Object.freeze({
-      type: value.type,
-      multiplier: value.multiplier,
+      type: candidate.type,
+      multiplier: candidate.multiplier,
       ...(minMinuteOfDay === undefined ? {} : { minMinuteOfDay: minMinuteOfDay as number }),
     });
   }
 
-  if (!hasOnlyKeys(value, ['type', 'multiplier'])) invalidDefinition();
-  return Object.freeze({ type: value.type, multiplier: value.multiplier }) as EventEffect;
+  if (Reflect.ownKeys(candidate).some((key) => key !== 'type' && key !== 'multiplier')) {
+    invalidDefinition();
+  }
+  return Object.freeze({ type: candidate.type, multiplier: candidate.multiplier }) as EventEffect;
 }
 
 function cloneDefinitions(definitions: unknown): readonly EventDefinition[] {
-  if (!Array.isArray(definitions) || definitions.length === 0) invalidDefinition();
+  const definitionValues = readOwnDataArray(definitions, invalidDefinition);
+  if (definitionValues.length === 0) invalidDefinition();
 
   const ids = new Set<string>();
   const result: EventDefinition[] = [];
-  for (const candidate of definitions) {
+  for (const value of definitionValues) {
+    const candidate = readOwnDataRecord(
+      value,
+      ['id', 'durationMs', 'effects', 'choiceDurationMs'],
+      ['id', 'durationMs', 'effects'],
+      invalidDefinition,
+    );
     if (
-      !isRecord(candidate)
-      || !hasOnlyKeys(candidate, ['id', 'durationMs', 'effects', 'choiceDurationMs'])
-      || !isPrimitiveNonEmptyString(candidate.id)
+      !isPrimitiveNonEmptyString(candidate.id)
       || !EVENT_IDS.has(candidate.id)
       || ids.has(candidate.id)
       || !Number.isSafeInteger(candidate.durationMs)
       || (candidate.durationMs as number) < 0
-      || !Array.isArray(candidate.effects)
-      || candidate.effects.length === 0
     ) invalidDefinition();
 
     const id = candidate.id as EventId;
     const durationMs = candidate.durationMs as number;
-    const effects = Object.freeze(candidate.effects.map(cloneEffect));
+    const effectValues = readOwnDataArray(candidate.effects, invalidDefinition);
+    if (effectValues.length === 0) invalidDefinition();
+    const effects = Object.freeze(effectValues.map(cloneEffect));
     const choiceDurationMs = candidate.choiceDurationMs;
     const hasRequestEffect = effects.some((effect) => effect.type === 'request-task-offer');
 
@@ -381,11 +448,15 @@ export class EventSystem {
   }
 
   restore(snapshot: EventSystemSnapshot): void {
-    if (!isRecord(snapshot)) invalidSnapshot();
-    const activeInput = snapshot.activeEvents;
-    const usedInput = snapshot.usedEventIds;
-    const pendingInput = snapshot.pendingEventChoice;
-    if (!Array.isArray(activeInput) || !Array.isArray(usedInput)) invalidSnapshot();
+    const snapshotFields = readOwnDataRecord(
+      snapshot,
+      ['activeEvents', 'usedEventIds', 'pendingEventChoice'],
+      ['activeEvents', 'usedEventIds'],
+      invalidSnapshot,
+    );
+    const activeInput = readOwnDataArray(snapshotFields.activeEvents, invalidSnapshot);
+    const usedInput = readOwnDataArray(snapshotFields.usedEventIds, invalidSnapshot);
+    const pendingInput = snapshotFields.pendingEventChoice;
 
     const nextUsed = new Set<EventId>();
     for (const id of usedInput) {
@@ -399,11 +470,15 @@ export class EventSystem {
 
     const activeIds = new Set<EventId>();
     const nextActive: ActiveEvent[] = [];
-    for (const active of activeInput) {
+    for (const activeValue of activeInput) {
+      const active = readOwnDataRecord(
+        activeValue,
+        ['id', 'expiresAtMs'],
+        ['id', 'expiresAtMs'],
+        invalidSnapshot,
+      );
       if (
-        !isRecord(active)
-        || !hasOnlyKeys(active, ['id', 'expiresAtMs'])
-        || !isPrimitiveNonEmptyString(active.id)
+        !isPrimitiveNonEmptyString(active.id)
         || !this.definitionsById.has(active.id as EventId)
         || activeIds.has(active.id as EventId)
         || !isFiniteNonnegativeNumber(active.expiresAtMs)
@@ -417,19 +492,24 @@ export class EventSystem {
 
     let nextPending: PendingChoice | undefined;
     if (pendingInput !== undefined) {
+      const pending = readOwnDataRecord(
+        pendingInput,
+        ['id', 'remainingMs'],
+        ['id', 'remainingMs'],
+        invalidSnapshot,
+      );
+      const maximumRemainingMs = this.definitionsById.get('secretary-help')?.choiceDurationMs;
       if (
-        !isRecord(pendingInput)
-        || !hasOnlyKeys(pendingInput, ['id', 'remainingMs'])
-        || pendingInput.id !== 'secretary-help'
-        || !isFiniteNonnegativeNumber(pendingInput.remainingMs)
-        || pendingInput.remainingMs > 5_000
-        || !this.definitionsById.has('secretary-help')
+        pending.id !== 'secretary-help'
+        || !isFiniteNonnegativeNumber(pending.remainingMs)
+        || maximumRemainingMs === undefined
+        || pending.remainingMs > maximumRemainingMs
         || !nextUsed.has('secretary-help')
         || activeIds.has('secretary-help')
       ) invalidSnapshot();
       nextPending = {
         id: 'secretary-help',
-        remainingMs: pendingInput.remainingMs,
+        remainingMs: pending.remainingMs,
       };
     }
 

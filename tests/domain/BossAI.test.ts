@@ -132,6 +132,49 @@ describe('BossAI state machine', () => {
     expect(capped.snapshot().state).toBe('warning');
   });
 
+  it('applies an optional validated event multiplier after the base chance clamp', () => {
+    const omitted = new BossAI(new StubRandom([0.249, 0]));
+    omitted.accept('omitted', task(), 0, DEFAULT_CONTEXT);
+    expect(omitted.snapshot().state).toBe('warning');
+
+    const explicitDefault = new BossAI(new StubRandom([0.249, 0]));
+    explicitDefault.accept('explicit-default', task(), 0, DEFAULT_CONTEXT, 1);
+    expect(explicitDefault.snapshot().state).toBe('warning');
+
+    const reduced = new BossAI(new StubRandom([0.1]));
+    reduced.accept('reduced', task(), 0, DEFAULT_CONTEXT, 0.2);
+    expect(reduced.snapshot().state).toBe('working');
+
+    const increased = new BossAI(new StubRandom([0.3, 0]));
+    increased.accept('increased', task(), 0, DEFAULT_CONTEXT, 1.5);
+    expect(increased.snapshot().state).toBe('warning');
+
+    const disabled = new BossAI(new StubRandom([0]));
+    disabled.accept('disabled', task(), 0, DEFAULT_CONTEXT, 0);
+    expect(disabled.snapshot().state).toBe('working');
+  });
+
+  it('rejects invalid event chance multipliers atomically without consuming RNG', () => {
+    for (const invalid of [
+      -0.1,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      new Number(1),
+    ]) {
+      const boss = new BossAI(new StubRandom([0.99]));
+      expect(() => boss.accept('invalid-multiplier', task(), 0, DEFAULT_CONTEXT, invalid as number))
+        .toThrow('multiplier');
+      expect(boss.snapshot()).toEqual({
+        state: 'idle',
+        remainingWorkMs: 0,
+        warningRemainingMs: 0,
+      });
+      expect(() => boss.accept('valid-after-rejection', task(), 0, DEFAULT_CONTEXT)).not.toThrow();
+      expect(boss.snapshot().state).toBe('working');
+    }
+  });
+
   it('publishes both warning transitions and the legitimacy flag without losing the task ID', () => {
     const boss = new BossAI(new StubRandom([0, 0]));
     const events = boss.accept(

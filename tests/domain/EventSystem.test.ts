@@ -319,6 +319,65 @@ describe('EventSystem snapshots and configuration validation', () => {
     expect(() => restored.activate('board-observer', 1_001)).toThrow('already used');
   });
 
+  it('rejects accessor TOCTOU snapshots and unknown top-level fields atomically', () => {
+    const events = activate('board-observer', 1_000);
+    const saved = events.snapshot();
+
+    let expiryReads = 0;
+    const active = { id: 'board-observer' } as Record<string, unknown>;
+    Object.defineProperty(active, 'expiresAtMs', {
+      enumerable: true,
+      get() {
+        expiryReads += 1;
+        return expiryReads === 1 ? 2_000 : Number.POSITIVE_INFINITY;
+      },
+    });
+
+    let remainingReads = 0;
+    const pending = { id: 'secretary-help' } as Record<string, unknown>;
+    Object.defineProperty(pending, 'remainingMs', {
+      enumerable: true,
+      get() {
+        remainingReads += 1;
+        return remainingReads <= 2 ? 1_000 : Number.POSITIVE_INFINITY;
+      },
+    });
+
+    for (const invalid of [
+      { activeEvents: [active], usedEventIds: ['board-observer'] },
+      { activeEvents: [], usedEventIds: ['secretary-help'], pendingEventChoice: pending },
+      { activeEvents: [], usedEventIds: [], extra: true },
+      { activeEvents: [{ id: 'board-observer', expiresAtMs: 2_000, extra: true }], usedEventIds: ['board-observer'] },
+      { activeEvents: [], usedEventIds: [], [Symbol('extra')]: true },
+    ]) {
+      expect(() => events.restore(invalid as never)).toThrow('event snapshot');
+      expect(events.snapshot()).toEqual(saved);
+    }
+    expect(expiryReads).toBe(0);
+    expect(remainingReads).toBe(0);
+  });
+
+  it('round-trips a custom secretary choice duration from its validated definitions', () => {
+    const custom = EVENT_DEFINITIONS.map((definition) => (
+      definition.id === 'secretary-help'
+        ? { ...definition, choiceDurationMs: 6_000 }
+        : definition
+    ));
+    const original = new EventSystem(new StubRandom([]), custom);
+    original.activate('secretary-help', 1_000);
+    const saved = original.snapshot();
+    expect(saved.pendingEventChoice).toEqual({ id: 'secretary-help', remainingMs: 6_000 });
+
+    const restored = new EventSystem(new StubRandom([]), custom);
+    expect(() => restored.restore(saved)).not.toThrow();
+    expect(restored.snapshot()).toEqual(saved);
+    expect(() => restored.restore({
+      activeEvents: [],
+      usedEventIds: ['secretary-help'],
+      pendingEventChoice: { id: 'secretary-help', remainingMs: 6_001 },
+    })).toThrow('event snapshot');
+  });
+
   it('clones definitions and rejects duplicates, missing fields, and unknown effects', () => {
     const mutable = EVENT_DEFINITIONS.map((definition) => ({
       ...definition,
@@ -339,6 +398,68 @@ describe('EventSystem snapshots and configuration validation', () => {
     ]) {
       expect(() => new EventSystem(new StubRandom([]), invalid as never)).toThrow('event definition');
     }
+  });
+
+  it('rejects definition/effect/array accessors before reading or retaining them', () => {
+    let durationReads = 0;
+    const durationAccessor = {
+      id: 'board-observer',
+      effects: EVENT_DEFINITIONS[0].effects,
+    } as Record<string, unknown>;
+    Object.defineProperty(durationAccessor, 'durationMs', {
+      enumerable: true,
+      get() {
+        durationReads += 1;
+        return durationReads === 1 ? 30_000 : Number.POSITIVE_INFINITY;
+      },
+    });
+
+    let multiplierReads = 0;
+    const multiplierAccessor = { type: 'boss-work-speed' } as Record<string, unknown>;
+    Object.defineProperty(multiplierAccessor, 'multiplier', {
+      enumerable: true,
+      get() {
+        multiplierReads += 1;
+        return multiplierReads <= 3 ? 1.3 : Number.POSITIVE_INFINITY;
+      },
+    });
+
+    let definitionIndexReads = 0;
+    const accessorDefinitions: EventDefinition[] = [];
+    Object.defineProperty(accessorDefinitions, '0', {
+      enumerable: true,
+      configurable: true,
+      get() {
+        definitionIndexReads += 1;
+        return EVENT_DEFINITIONS[0];
+      },
+    });
+    Object.defineProperty(accessorDefinitions, 'length', { value: 1, writable: true });
+
+    let effectIndexReads = 0;
+    const accessorEffects: unknown[] = [];
+    Object.defineProperty(accessorEffects, '0', {
+      enumerable: true,
+      configurable: true,
+      get() {
+        effectIndexReads += 1;
+        return EVENT_DEFINITIONS[0].effects[0];
+      },
+    });
+    Object.defineProperty(accessorEffects, 'length', { value: 1, writable: true });
+
+    for (const invalid of [
+      [durationAccessor],
+      [{ ...EVENT_DEFINITIONS[0], effects: [multiplierAccessor] }],
+      accessorDefinitions,
+      [{ ...EVENT_DEFINITIONS[0], effects: accessorEffects }],
+    ]) {
+      expect(() => new EventSystem(new StubRandom([]), invalid as never)).toThrow('event definition');
+    }
+    expect(durationReads).toBe(0);
+    expect(multiplierReads).toBe(0);
+    expect(definitionIndexReads).toBe(0);
+    expect(effectIndexReads).toBe(0);
   });
 
   it('returns frozen detached modifier and event values', () => {

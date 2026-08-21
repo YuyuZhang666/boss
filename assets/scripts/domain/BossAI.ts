@@ -184,17 +184,25 @@ export class BossAI {
     task: TaskDefinition,
     nowMs: number,
     context: BossContext,
+    avoidanceChanceMultiplier = 1,
   ): DomainEvent[] {
     if (this.currentState !== 'idle') throw new Error('BossAI can only accept while idle');
     if (!isPrimitiveNonEmptyString(instanceId)) throw new Error('invalid task instance ID');
     validateTask(task);
     if (!isFiniteNumber(nowMs) || nowMs < 0) throw new Error('invalid current time');
     validateContext(context);
+    if (!isFiniteNumber(avoidanceChanceMultiplier) || avoidanceChanceMultiplier < 0) {
+      throw new Error('invalid avoidance chance multiplier');
+    }
 
     const chanceRoll = validateUnitRandom(this.random.next());
     let selectedAvoidance: AvoidanceType | undefined;
     let selectedLegitimate: boolean | undefined;
-    if (chanceRoll < avoidanceChance(context)) {
+    const effectiveAvoidanceChance = Math.min(
+      1,
+      Math.max(0, avoidanceChance(context) * avoidanceChanceMultiplier),
+    );
+    if (chanceRoll < effectiveAvoidanceChance) {
       const candidates = avoidanceCandidates(task);
       const index = validateRandomIndex(this.random.int(0, candidates.length), candidates.length);
       selectedAvoidance = candidates[index];
