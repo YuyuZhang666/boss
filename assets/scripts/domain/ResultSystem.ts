@@ -61,6 +61,7 @@ const INTEGER_STAT_KEYS = new Set<string>([
   'bossCompleted',
   'bossWorkload',
   'totalWorkload',
+  'bossWorkMs',
   'meetings',
   'usefulMeetings',
   'dumpAttempts',
@@ -163,7 +164,6 @@ function parseStatistics(value: unknown): SessionStatistics {
     parsed.bossWorkload > parsed.totalWorkload
     || parsed.bossCompleted > parsed.bossWorkload
     || (parsed.bossCompleted === 0 && parsed.bossWorkload !== 0)
-    || parsed.usefulMeetings > parsed.meetings
     || parsed.dumpSuccesses > parsed.dumpAttempts
     || (parsed.outsources === 0 && parsed.outsourceCost !== 0)
   ) {
@@ -182,12 +182,21 @@ function parseInput(input: unknown): ResultInput {
   };
 }
 
+function ceilFraction(value: number, numerator: number, denominator: number): number {
+  // value = quotient * denominator + remainder; numerator <= denominator keeps
+  // both integer products within MAX_SAFE_INTEGER using ordinary numbers.
+  const quotient = Math.floor(value / denominator);
+  const remainder = value % denominator;
+  return quotient * numerator + Math.ceil(remainder * numerator / denominator);
+}
+
 function goalMet(dayId: DayId, meters: MeterSnapshot, stats: SessionStatistics): boolean {
   switch (dayId) {
     case 'day-1':
       return stats.bossCompleted >= 3;
     case 'day-2':
-      return (stats.totalWorkload === 0 ? 0 : stats.bossWorkload / stats.totalWorkload) >= 0.35;
+      return stats.totalWorkload !== 0
+        && stats.bossWorkload >= ceilFraction(stats.totalWorkload, 7, 20);
     case 'day-3':
       return meters.company >= 50 && meters.rectification >= 70;
   }
@@ -230,7 +239,10 @@ function calculateTitle(
   stats: SessionStatistics,
 ): string {
   if (grade === 'SSS') return '让老板心甘情愿打工的人';
-  if (stats.meetings >= 5 && stats.usefulMeetings / stats.meetings < 0.3) {
+  if (
+    stats.meetings >= 5
+    && stats.usefulMeetings < ceilFraction(stats.meetings, 3, 10)
+  ) {
     return '会议终结者';
   }
   if (stats.dumpAttempts >= 4 && stats.dumpSuccesses === 0) return '甩锅回旋镖大师';
@@ -250,6 +262,10 @@ function formatWorkTime(bossWorkMs: number): string {
   return `${hours}小时${minutes}分钟`;
 }
 
+function formatMeter(value: number): string {
+  return Number(value.toFixed(6)).toString();
+}
+
 function buildReport(meters: MeterSnapshot, stats: SessionStatistics): readonly ReportRow[] {
   return Object.freeze([
     row('老板亲自工作时长', formatWorkTime(stats.bossWorkMs), 'good'),
@@ -262,10 +278,10 @@ function buildReport(meters: MeterSnapshot, stats: SessionStatistics): readonly 
     row('外包次数', `${stats.outsources}次`, 'funny'),
     row('外包成本', `${stats.outsourceCost}点`, stats.outsourceCost === 0 ? 'good' : 'bad'),
     row('“这个很简单”出现次数', `${stats.simplePhraseCount}次`, 'funny'),
-    row('公司经营', `${meters.company}`, meters.company >= 50 ? 'good' : 'bad'),
-    row('整改进度', `${meters.rectification}`, meters.rectification >= 70 ? 'good' : 'bad'),
-    row('老板面子', `${meters.face}`, 'funny'),
-    row('董事会信任', `${meters.trust}`, meters.trust >= 50 ? 'good' : 'bad'),
+    row('公司经营', formatMeter(meters.company), meters.company >= 50 ? 'good' : 'bad'),
+    row('整改进度', formatMeter(meters.rectification), meters.rectification >= 70 ? 'good' : 'bad'),
+    row('老板面子', formatMeter(meters.face), 'funny'),
+    row('董事会信任', formatMeter(meters.trust), meters.trust >= 50 ? 'good' : 'bad'),
   ]);
 }
 

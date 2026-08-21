@@ -30,6 +30,22 @@ const BASE_METERS = {
   trust: 75,
 };
 
+const TASK8_EMPTY_STATS: SessionStatistics = {
+  bossCompleted: 0,
+  bossWorkload: 0,
+  totalWorkload: 0,
+  bossWorkMs: 0,
+  meetings: 0,
+  usefulMeetings: 0,
+  dumpAttempts: 0,
+  dumpSuccesses: 0,
+  outsources: 0,
+  outsourceCost: 0,
+  simplePhraseCount: 0,
+  unresolvedUrgent: 0,
+  counteredAvoidances: 0,
+};
+
 function evaluate(
   overrides: Partial<ResultInput> = {},
 ) {
@@ -82,7 +98,35 @@ describe('ResultSystem goals and score', () => {
     }).goalMet).toBe(false);
     expect(evaluate({
       dayId: 'day-2',
+      stats: stats({ bossWorkload: 8, totalWorkload: 20 }),
+    }).goalMet).toBe(true);
+    expect(evaluate({
+      dayId: 'day-2',
       stats: stats({ bossCompleted: 0, bossWorkload: 0, totalWorkload: 0 }),
+    }).goalMet).toBe(false);
+  });
+
+  it('compares the day-two ratio exactly for large safe integers', () => {
+    expect(evaluate({
+      dayId: 'day-2',
+      stats: stats({
+        bossWorkload: 3_152_519_739_159_346,
+        totalWorkload: 9_007_199_254_740_989,
+      }),
+    }).goalMet).toBe(false);
+    expect(evaluate({
+      dayId: 'day-2',
+      stats: stats({
+        bossWorkload: 3_152_519_739_159_347,
+        totalWorkload: Number.MAX_SAFE_INTEGER,
+      }),
+    }).goalMet).toBe(true);
+    expect(evaluate({
+      dayId: 'day-2',
+      stats: stats({
+        bossWorkload: 3_152_519_739_159_346,
+        totalWorkload: Number.MAX_SAFE_INTEGER,
+      }),
     }).goalMet).toBe(false);
   });
 
@@ -206,6 +250,32 @@ describe('ResultSystem title precedence', () => {
       meters: { company: 50, rectification: 50, face: 50, trust: 50 },
       stats: stats({ meetings: 10, usefulMeetings: 2 }),
     }).title).toBe('会议终结者');
+    expect(evaluate({
+      dayId: 'day-1',
+      meters: { company: 50, rectification: 50, face: 50, trust: 50 },
+      stats: stats({ meetings: 10, usefulMeetings: 4 }),
+    }).title).toBe('温和改革派');
+  });
+
+  it('compares the meeting ratio exactly at MAX_SAFE_INTEGER', () => {
+    const common = {
+      dayId: 'day-1' as const,
+      meters: { company: 50, rectification: 50, face: 50, trust: 50 },
+    };
+    expect(evaluate({
+      ...common,
+      stats: stats({
+        meetings: Number.MAX_SAFE_INTEGER,
+        usefulMeetings: 2_702_159_776_422_297,
+      }),
+    }).title).toBe('会议终结者');
+    expect(evaluate({
+      ...common,
+      stats: stats({
+        meetings: Number.MAX_SAFE_INTEGER,
+        usefulMeetings: 2_702_159_776_422_298,
+      }),
+    }).title).toBe('温和改革派');
   });
 });
 
@@ -243,6 +313,53 @@ describe('ResultSystem report', () => {
     expect(evaluate({
       stats: stats({ bossWorkMs: 3_630_000 }),
     }).report[0].value).toBe('1小时1分钟');
+  });
+
+  it('formats the largest accepted work time without scientific notation', () => {
+    const value = evaluate({
+      stats: stats({ bossWorkMs: Number.MAX_SAFE_INTEGER }),
+    }).report[0].value;
+    const match = /^(\d+)小时(\d+)分钟$/.exec(value);
+    expect(value).not.toMatch(/[eE]/);
+    expect(match).not.toBeNull();
+    expect(Number(match![2])).toBeGreaterThanOrEqual(0);
+    expect(Number(match![2])).toBeLessThan(60);
+  });
+
+  it('formats meters with at most six decimals without changing scoring inputs', () => {
+    const result = evaluate({
+      dayId: 'day-1',
+      meters: {
+        company: 54.800000000000004,
+        rectification: 0,
+        face: 100,
+        trust: 12.3456789,
+      },
+    });
+    expect(result.report.slice(10).map((row) => row.value)).toEqual([
+      '54.8', '0', '100', '12.345679',
+    ]);
+    expect(result.score).toBe(Math.round(
+      54.800000000000004 * 0.25 + 12.3456789 * 0.20,
+    ));
+
+    const scoringProbe = evaluate({
+      dayId: 'day-1',
+      meters: { company: 1.9999998, rectification: 0, face: 100, trust: 0 },
+    });
+    expect(scoringProbe.report[10].value).toBe('2');
+    expect(scoringProbe.score).toBe(0);
+  });
+
+  it('accepts the locked Task 8 useful-meeting-only state and reports both counters', () => {
+    const result = evaluate({
+      dayId: 'day-1',
+      meters: { company: 50, rectification: 50, face: 50, trust: 50 },
+      stats: { ...TASK8_EMPTY_STATS, usefulMeetings: 1 },
+    });
+    expect(result.title).toBe('温和改革派');
+    expect(result.report[3].value).toBe('0次');
+    expect(result.report[4].value).toBe('1次');
   });
 
   it('does not add internal totals, urgent work, or future counters to the report', () => {
@@ -294,12 +411,14 @@ describe('ResultSystem immutability and validation', () => {
       { ...BASE_STATS, bossCompleted: Number.MAX_SAFE_INTEGER + 1 },
       { ...BASE_STATS, bossWorkMs: Number.NaN },
       { ...BASE_STATS, bossWorkMs: Number.POSITIVE_INFINITY },
+      { ...BASE_STATS, bossWorkMs: Number.MAX_VALUE },
+      { ...BASE_STATS, bossWorkMs: Number.MAX_SAFE_INTEGER + 1 },
+      { ...BASE_STATS, bossWorkMs: 0.5 },
       { ...BASE_STATS, outsourceCost: -0.01 },
       { ...BASE_STATS, outsources: 1, outsourceCost: 0.5 },
       { ...BASE_STATS, bossWorkload: 31, totalWorkload: 30 },
       { ...BASE_STATS, bossCompleted: 19, bossWorkload: 18 },
       { ...BASE_STATS, bossCompleted: 0, bossWorkload: 1 },
-      { ...BASE_STATS, usefulMeetings: 3, meetings: 2 },
       { ...BASE_STATS, dumpSuccesses: 4, dumpAttempts: 3 },
       { ...BASE_STATS, outsources: 0, outsourceCost: 1 },
     ];
