@@ -353,6 +353,7 @@ export class BossAI {
       || typeof avoidance !== 'string'
       || !AVOIDANCE_TYPES.has(avoidance)
       || typeof avoidanceLegitimate !== 'boolean'
+      || (avoidanceLegitimate === true && avoidance !== 'meeting' && avoidance !== 'outsource')
       || remainingWorkMs <= 0
       || warningRemainingMs <= 0
       || warningRemainingMs > MAX_WARNING_MS

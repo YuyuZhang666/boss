@@ -423,4 +423,20 @@ describe('BossAI state machine', () => {
       expect(restored.snapshot()).toEqual(saved);
     }
   });
+
+  it('rejects legitimate=true for avoidances that can never be legitimate', () => {
+    const boss = warningBoss(task(), 0, 'legitimacy-restore-1');
+    const original = boss.snapshot();
+    for (const avoidance of ['dump', 'change-request', 'strategic-upgrade'] as const) {
+      expect(() => boss.restore({
+        state: 'warning',
+        taskInstanceId: 'forged-legitimacy-1',
+        avoidance,
+        avoidanceLegitimate: true,
+        remainingWorkMs: 1_000,
+        warningRemainingMs: 500,
+      })).toThrow('invalid boss snapshot');
+      expect(boss.snapshot()).toEqual(original);
+    }
+  });
 });
