@@ -64,6 +64,102 @@ function invalidDefinition(): never {
   throw new Error('invalid event definition');
 }
 
+type ModifierCategory =
+  | 'boss-work-speed'
+  | 'employee-work-speed'
+  | 'avoidance-chance'
+  | 'trust-gain';
+
+const MODIFIER_CATEGORIES = Object.freeze([
+  'boss-work-speed',
+  'employee-work-speed',
+  'avoidance-chance',
+  'trust-gain',
+] as const);
+
+function multiplyFiniteModifier(left: number, right: number, definitionError: boolean): number {
+  if (left === 0 || right === 0) return 0;
+  const product = left * right;
+  if (!Number.isFinite(product) || product < 0) {
+    if (definitionError) invalidDefinition();
+    throw new Error('invalid internal event modifier product');
+  }
+  return product;
+}
+
+function definitionCategoryFactor(
+  definition: EventDefinition,
+  category: ModifierCategory,
+  avoidanceChannel: 'all' | 'unconditional' | 'conditional' = 'all',
+): number {
+  const multipliers: number[] = [];
+  for (const effect of definition.effects) {
+    if (effect.type !== category || effect.multiplier <= 1) continue;
+    if (category === 'avoidance-chance' && effect.type === 'avoidance-chance') {
+      const conditional = effect.minMinuteOfDay !== undefined;
+      if (
+        (avoidanceChannel === 'unconditional' && conditional)
+        || (avoidanceChannel === 'conditional' && !conditional)
+      ) continue;
+    }
+    multipliers.push(effect.multiplier);
+  }
+  return multipliers.reduce(
+    (product, multiplier) => multiplyFiniteModifier(product, multiplier, true),
+    1,
+  );
+}
+
+function maximumGrowthProduct(
+  definitions: readonly EventDefinition[],
+  category: ModifierCategory,
+  avoidanceChannel: 'all' | 'unconditional' | 'conditional' = 'all',
+): number {
+  let maximumConcurrentProduct = 1;
+  for (const definition of definitions) {
+    const groupFactor = definitionCategoryFactor(definition, category, avoidanceChannel);
+    if (groupFactor > 1) {
+      maximumConcurrentProduct = multiplyFiniteModifier(
+        maximumConcurrentProduct,
+        groupFactor,
+        true,
+      );
+    }
+  }
+  return maximumConcurrentProduct;
+}
+
+function validateModifierProducts(definitions: readonly EventDefinition[]): void {
+  for (const category of MODIFIER_CATEGORIES) {
+    if (category !== 'avoidance-chance') {
+      maximumGrowthProduct(definitions, category);
+    }
+  }
+  const unconditionalAvoidance = maximumGrowthProduct(
+    definitions,
+    'avoidance-chance',
+    'unconditional',
+  );
+  const conditionalAvoidance = maximumGrowthProduct(
+    definitions,
+    'avoidance-chance',
+    'conditional',
+  );
+  multiplyFiniteModifier(unconditionalAvoidance, conditionalAvoidance, true);
+}
+
+function checkedExpiry(nowMs: number, durationMs: number): number {
+  const expiresAtMs = nowMs + durationMs;
+  if (
+    !Number.isFinite(expiresAtMs)
+    || expiresAtMs < 0
+    || (durationMs > 0 && expiresAtMs <= nowMs)
+  ) {
+    throw new Error('event expiry is not representable');
+  }
+  return expiresAtMs;
+}
+
 function readOwnDataRecord(
   value: unknown,
   allowedKeys: readonly string[],
@@ -229,6 +325,7 @@ function cloneDefinitions(definitions: unknown): readonly EventDefinition[] {
       ...(choiceDurationMs === undefined ? {} : { choiceDurationMs: choiceDurationMs as number }),
     }));
   }
+  validateModifierProducts(result);
   return Object.freeze(result);
 }
 
@@ -313,6 +410,14 @@ export class EventSystem {
       }
     }
 
+    let activationExpiry: number | undefined;
+    let choiceExpiry: number | undefined;
+    if (definition.id === 'secretary-help') {
+      choiceExpiry = checkedExpiry(nowMs, definition.choiceDurationMs!);
+    } else if (definition.id !== 'vip-visit') {
+      activationExpiry = checkedExpiry(nowMs, definition.durationMs);
+    }
+    this.validateAdvanceTo(nowMs);
     const events = this.advanceTo(nowMs);
     this.usedEventIds.add(definition.id);
 
@@ -331,17 +436,17 @@ export class EventSystem {
       this.pendingChoice = {
         id: definition.id,
         remainingMs: choiceDurationMs,
-        expiresAtMs: nowMs + choiceDurationMs,
+        expiresAtMs: choiceExpiry!,
       };
       events.push(domainEvent('event-choice-pending', {
         eventId: definition.id,
-        expiresAtMs: nowMs + choiceDurationMs,
+        expiresAtMs: choiceExpiry!,
         choiceDurationMs,
       }));
       return freezeEvents(events);
     }
 
-    this.startActive(definition, nowMs, events);
+    this.startActive(definition, nowMs, events, activationExpiry);
     return freezeEvents(events);
   }
 
@@ -356,6 +461,12 @@ export class EventSystem {
       throw new Error('no matching pending choice');
     }
 
+    const pendingExpiry = this.pendingChoice.expiresAtMs
+      ?? checkedExpiry(nowMs, this.pendingChoice.remainingMs);
+    this.validateAdvanceTo(nowMs);
+    const explicitIgnoreExpiry = choice === 'ignore' && pendingExpiry > nowMs
+      ? checkedExpiry(nowMs, this.definitionsById.get(id)!.durationMs)
+      : undefined;
     const events = this.advanceTo(nowMs);
     if (this.pendingChoice === undefined) return freezeEvents(events);
 
@@ -367,7 +478,7 @@ export class EventSystem {
       resolvedAtMs: nowMs,
     }));
     if (choice === 'ignore') {
-      this.startActive(this.definitionsById.get(id)!, nowMs, events);
+      this.startActive(this.definitionsById.get(id)!, nowMs, events, explicitIgnoreExpiry);
     }
     return freezeEvents(events);
   }
@@ -375,6 +486,7 @@ export class EventSystem {
   tick(nowMs: number): DomainEvent[] {
     validateNow(nowMs);
     this.requireMonotonic(nowMs);
+    this.validateAdvanceTo(nowMs);
     return freezeEvents(this.advanceTo(nowMs));
   }
 
@@ -390,17 +502,25 @@ export class EventSystem {
       for (const effect of definition.effects) {
         switch (effect.type) {
           case 'boss-work-speed':
-            bossWorkSpeed *= effect.multiplier;
+            bossWorkSpeed = multiplyFiniteModifier(bossWorkSpeed, effect.multiplier, false);
             break;
           case 'employee-work-speed':
-            employeeWorkSpeed *= effect.multiplier;
+            employeeWorkSpeed = multiplyFiniteModifier(employeeWorkSpeed, effect.multiplier, false);
             break;
           case 'trust-gain':
-            trustGainMultiplier *= effect.multiplier;
+            trustGainMultiplier = multiplyFiniteModifier(
+              trustGainMultiplier,
+              effect.multiplier,
+              false,
+            );
             break;
           case 'avoidance-chance':
             if (effect.minMinuteOfDay === undefined) {
-              avoidanceChanceMultiplier *= effect.multiplier;
+              avoidanceChanceMultiplier = multiplyFiniteModifier(
+                avoidanceChanceMultiplier,
+                effect.multiplier,
+                false,
+              );
             } else {
               conditional.push(Object.freeze({
                 sourceEventId: active.id,
@@ -536,8 +656,10 @@ export class EventSystem {
     definition: EventDefinition,
     activatedAtMs: number,
     events: DomainEvent[],
+    precomputedExpiry?: number,
   ): void {
-    const expiresAtMs = activatedAtMs + definition.durationMs;
+    const expiresAtMs = precomputedExpiry
+      ?? checkedExpiry(activatedAtMs, definition.durationMs);
     this.activeEvents.push({ id: definition.id, expiresAtMs });
     events.push(domainEvent('event-activated', {
       eventId: definition.id,
@@ -550,7 +672,7 @@ export class EventSystem {
     const events: DomainEvent[] = [];
     if (this.lastNowMs === undefined) {
       if (this.pendingChoice !== undefined && this.pendingChoice.expiresAtMs === undefined) {
-        this.pendingChoice.expiresAtMs = nowMs + this.pendingChoice.remainingMs;
+        this.pendingChoice.expiresAtMs = checkedExpiry(nowMs, this.pendingChoice.remainingMs);
       }
       this.lastNowMs = nowMs;
     }
@@ -597,5 +719,17 @@ export class EventSystem {
       this.pendingChoice.remainingMs = Math.max(0, this.pendingChoice.expiresAtMs - nowMs);
     }
     return events;
+  }
+
+  private validateAdvanceTo(nowMs: number): void {
+    if (this.pendingChoice === undefined) return;
+    const pendingExpiry = this.pendingChoice.expiresAtMs
+      ?? checkedExpiry(nowMs, this.pendingChoice.remainingMs);
+    if (pendingExpiry <= nowMs) {
+      checkedExpiry(
+        pendingExpiry,
+        this.definitionsById.get('secretary-help')!.durationMs,
+      );
+    }
   }
 }

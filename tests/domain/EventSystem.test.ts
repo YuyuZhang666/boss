@@ -462,6 +462,109 @@ describe('EventSystem snapshots and configuration validation', () => {
     expect(effectIndexReads).toBe(0);
   });
 
+  it('rejects per-event and concurrent modifier products that can overflow', () => {
+    const overflowingAvoidance = [{
+      ...EVENT_DEFINITIONS[0],
+      effects: [
+        { type: 'avoidance-chance', multiplier: 1e200 },
+        { type: 'avoidance-chance', multiplier: 1e200, minMinuteOfDay: 990 },
+      ],
+    }];
+    expect(() => new EventSystem(new StubRandom([]), overflowingAvoidance as never))
+      .toThrow('event definition');
+
+    const overflowingConcurrentBossSpeed = EVENT_DEFINITIONS
+      .filter((definition) => (
+        definition.id === 'board-observer'
+        || definition.id === 'secretary-help'
+        || definition.id === 'coffee-broken'
+      ))
+      .map((definition) => {
+        if (definition.id === 'coffee-broken') return definition;
+        return {
+          ...definition,
+          effects: [{ type: 'boss-work-speed', multiplier: 1e200 }],
+        };
+      });
+    expect(() => new EventSystem(new StubRandom([]), overflowingConcurrentBossSpeed as never))
+      .toThrow('event definition');
+  });
+
+  it('does not let zero multipliers mask overflowing scalar or conditional channels', () => {
+    const maskedConditionalAvoidance = [{
+      ...EVENT_DEFINITIONS[0],
+      effects: [
+        { type: 'avoidance-chance', multiplier: 0 },
+        { type: 'avoidance-chance', multiplier: 1e200, minMinuteOfDay: 900 },
+        { type: 'avoidance-chance', multiplier: 1e200, minMinuteOfDay: 990 },
+      ],
+    }];
+    expect(() => new EventSystem(new StubRandom([]), maskedConditionalAvoidance as never))
+      .toThrow('event definition');
+
+    const maskedBossSpeed = [{
+      ...EVENT_DEFINITIONS[0],
+      effects: [
+        { type: 'boss-work-speed', multiplier: 1e200 },
+        { type: 'boss-work-speed', multiplier: 1e200 },
+        { type: 'boss-work-speed', multiplier: 0 },
+      ],
+    }];
+    expect(() => new EventSystem(new StubRandom([]), maskedBossSpeed as never))
+      .toThrow('event definition');
+  });
+
+  it('rejects unrepresentable activation expiries before any state or used-ID mutation', () => {
+    const ordinary = system();
+    const ordinaryBefore = ordinary.snapshot();
+    expect(() => ordinary.activate('board-observer', Number.MAX_VALUE)).toThrow('expiry');
+    expect(ordinary.snapshot()).toEqual(ordinaryBefore);
+
+    const secretary = system();
+    const secretaryBefore = secretary.snapshot();
+    expect(() => secretary.activate('secretary-help', Number.MAX_VALUE)).toThrow('expiry');
+    expect(secretary.snapshot()).toEqual(secretaryBefore);
+  });
+
+  it('keeps restored pending state and time anchor atomic when expiry arithmetic fails', () => {
+    const longSecretary = EVENT_DEFINITIONS.map((definition) => (
+      definition.id === 'secretary-help'
+        ? { ...definition, durationMs: Number.MAX_SAFE_INTEGER }
+        : definition
+    ));
+    const pendingZero = {
+      activeEvents: [],
+      usedEventIds: ['secretary-help'],
+      pendingEventChoice: { id: 'secretary-help' as const, remainingMs: 0 },
+    };
+
+    const choosing = new EventSystem(new StubRandom([]), longSecretary);
+    choosing.restore(pendingZero);
+    const chooseBefore = choosing.snapshot();
+    expect(() => choosing.choose('secretary-help', 'ignore', Number.MAX_VALUE / 2))
+      .toThrow('expiry');
+    expect(choosing.snapshot()).toEqual(chooseBefore);
+    expect(() => choosing.choose('secretary-help', 'ignore', 0)).not.toThrow();
+
+    const ticking = new EventSystem(new StubRandom([]), longSecretary);
+    ticking.restore(pendingZero);
+    const tickBefore = ticking.snapshot();
+    expect(() => ticking.tick(Number.MAX_VALUE / 2)).toThrow('expiry');
+    expect(ticking.snapshot()).toEqual(tickBefore);
+    expect(() => ticking.tick(0)).not.toThrow();
+
+    const binding = system();
+    binding.restore({
+      activeEvents: [],
+      usedEventIds: ['secretary-help'],
+      pendingEventChoice: { id: 'secretary-help', remainingMs: 1 },
+    });
+    const bindingBefore = binding.snapshot();
+    expect(() => binding.tick(Number.MAX_VALUE)).toThrow('expiry');
+    expect(binding.snapshot()).toEqual(bindingBefore);
+    expect(() => binding.tick(0)).not.toThrow();
+  });
+
   it('returns frozen detached modifier and event values', () => {
     const events = system();
     const activated = events.activate('golf-invite', 0);
