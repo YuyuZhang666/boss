@@ -23,6 +23,7 @@ export function verifyWechatBuild(root) {
   if (typeof project.appid !== 'string' || project.appid.length === 0) {
     throw new Error('build must contain appid');
   }
+  if (project.compileType !== 'game') throw new Error('build must have compileType game');
   const packageBytes = sizeOf(root);
   if (packageBytes > TARGET_BYTES) throw new Error('build exceeds 3.5 MB target');
   return { packageBytes, appid: project.appid };

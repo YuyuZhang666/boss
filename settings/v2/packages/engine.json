@@ -79,7 +79,7 @@
             "_value": false
           },
           "physics-2d": {
-            "_value": true,
+            "_value": false,
             "_option": "physics-2d-box2d"
           },
           "physics-2d-box2d": {
@@ -122,10 +122,10 @@
             "_value": true
           },
           "video": {
-            "_value": true
+            "_value": false
           },
           "webview": {
-            "_value": true
+            "_value": false
           },
           "tween": {
             "_value": true
@@ -204,15 +204,12 @@
           "intersection-2d",
           "mask",
           "particle-2d",
-          "physics-2d-box2d",
           "profiler",
           "rich-text",
           "spine-3.8",
           "tiled-map",
           "tween",
-          "ui",
-          "video",
-          "webview"
+          "ui"
         ],
         "noDeprecatedFeatures": {
           "value": false,
