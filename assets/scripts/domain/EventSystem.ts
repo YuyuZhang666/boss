@@ -87,65 +87,46 @@ function multiplyFiniteModifier(left: number, right: number, definitionError: bo
   return product;
 }
 
-function definitionCategoryFactor(
-  definition: EventDefinition,
-  category: ModifierCategory,
-  avoidanceChannel: 'all' | 'unconditional' | 'conditional' = 'all',
-): number {
-  const multipliers: number[] = [];
-  for (const effect of definition.effects) {
-    if (effect.type !== category || effect.multiplier <= 1) continue;
-    if (category === 'avoidance-chance' && effect.type === 'avoidance-chance') {
-      const conditional = effect.minMinuteOfDay !== undefined;
-      if (
-        (avoidanceChannel === 'unconditional' && conditional)
-        || (avoidanceChannel === 'conditional' && !conditional)
-      ) continue;
-    }
-    multipliers.push(effect.multiplier);
-  }
-  return multipliers.reduce(
-    (product, multiplier) => multiplyFiniteModifier(product, multiplier, true),
-    1,
-  );
-}
-
-function maximumGrowthProduct(
+function validateGrowthSequence(
   definitions: readonly EventDefinition[],
   category: ModifierCategory,
   avoidanceChannel: 'all' | 'unconditional' | 'conditional' = 'all',
+  initialProduct = 1,
 ): number {
-  let maximumConcurrentProduct = 1;
+  let product = initialProduct;
   for (const definition of definitions) {
-    const groupFactor = definitionCategoryFactor(definition, category, avoidanceChannel);
-    if (groupFactor > 1) {
-      maximumConcurrentProduct = multiplyFiniteModifier(
-        maximumConcurrentProduct,
-        groupFactor,
-        true,
-      );
+    for (const effect of definition.effects) {
+      if (effect.type !== category || effect.multiplier <= 1) continue;
+      if (category === 'avoidance-chance' && effect.type === 'avoidance-chance') {
+        const conditional = effect.minMinuteOfDay !== undefined;
+        if (
+          (avoidanceChannel === 'unconditional' && conditional)
+          || (avoidanceChannel === 'conditional' && !conditional)
+        ) continue;
+      }
+      product = multiplyFiniteModifier(product, effect.multiplier, true);
     }
   }
-  return maximumConcurrentProduct;
+  return product;
 }
 
 function validateModifierProducts(definitions: readonly EventDefinition[]): void {
   for (const category of MODIFIER_CATEGORIES) {
     if (category !== 'avoidance-chance') {
-      maximumGrowthProduct(definitions, category);
+      validateGrowthSequence(definitions, category);
     }
   }
-  const unconditionalAvoidance = maximumGrowthProduct(
+  const unconditionalAvoidance = validateGrowthSequence(
     definitions,
     'avoidance-chance',
     'unconditional',
   );
-  const conditionalAvoidance = maximumGrowthProduct(
+  validateGrowthSequence(
     definitions,
     'avoidance-chance',
     'conditional',
+    unconditionalAvoidance,
   );
-  multiplyFiniteModifier(unconditionalAvoidance, conditionalAvoidance, true);
 }
 
 function checkedExpiry(nowMs: number, durationMs: number): number {
@@ -154,6 +135,7 @@ function checkedExpiry(nowMs: number, durationMs: number): number {
     !Number.isFinite(expiresAtMs)
     || expiresAtMs < 0
     || (durationMs > 0 && expiresAtMs <= nowMs)
+    || expiresAtMs - nowMs !== durationMs
   ) {
     throw new Error('event expiry is not representable');
   }
@@ -497,7 +479,10 @@ export class EventSystem {
     let trustGainMultiplier = 1;
     const conditional: ConditionalAvoidanceChanceMultiplier[] = [];
 
-    for (const active of this.activeEvents) {
+    const activeInDefinitionOrder = [...this.activeEvents].sort((left, right) => (
+      this.definitionOrder.get(left.id)! - this.definitionOrder.get(right.id)!
+    ));
+    for (const active of activeInDefinitionOrder) {
       const definition = this.definitionsById.get(active.id)!;
       for (const effect of definition.effects) {
         switch (effect.type) {

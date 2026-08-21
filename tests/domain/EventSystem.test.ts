@@ -514,6 +514,98 @@ describe('EventSystem snapshots and configuration validation', () => {
       .toThrow('event definition');
   });
 
+  it('rejects definition-group rounding that differs from flat runtime effect order', () => {
+    const a = 1.7755404449475006e114;
+    const b = 5.425462918912909e117;
+    const c = 1.8661570542348534e76;
+    const groupedButRuntimeOverflowing = [
+      {
+        ...EVENT_DEFINITIONS[0],
+        effects: [{ type: 'boss-work-speed', multiplier: a }],
+      },
+      {
+        ...EVENT_DEFINITIONS[3],
+        effects: [
+          { type: 'boss-work-speed', multiplier: b },
+          { type: 'boss-work-speed', multiplier: c },
+        ],
+      },
+    ];
+    expect(a * (b * c)).toBe(Number.MAX_VALUE);
+    expect(Number.isFinite(a * b * c)).toBe(false);
+    expect(() => new EventSystem(new StubRandom([]), groupedButRuntimeOverflowing as never))
+      .toThrow('event definition');
+  });
+
+  it('computes scalar modifiers and conditional descriptors in canonical definition order', () => {
+    const a = 1.7755404449475006e114;
+    const b = 5.425462918912909e117;
+    const c = 1.8661570542348534e76;
+    const orderedIds = ['board-observer', 'team-building', 'secretary-help'];
+    const factors = { 'board-observer': b, 'team-building': c, 'secretary-help': a } as const;
+
+    const definitionsFor = (effect: 'boss-work-speed' | 'avoidance-chance') => [
+      EVENT_DEFINITIONS[0],
+      EVENT_DEFINITIONS[3],
+      EVENT_DEFINITIONS[2],
+    ].map((definition, index) => ({
+      ...definition,
+      effects: [effect === 'boss-work-speed'
+        ? { type: effect, multiplier: factors[definition.id as keyof typeof factors] }
+        : {
+          type: effect,
+          multiplier: factors[definition.id as keyof typeof factors],
+          minMinuteOfDay: 900 + index * 30,
+        }],
+    }));
+
+    const activateInOrder = (
+      definitions: readonly EventDefinition[],
+      order: readonly ('board-observer' | 'team-building' | 'secretary-help')[],
+    ): EventSystem => {
+      const events = new EventSystem(new StubRandom([]), definitions);
+      for (const id of order) {
+        events.activate(id, 0);
+        if (id === 'secretary-help') events.choose(id, 'ignore', 0);
+      }
+      return events;
+    };
+
+    const scalarDefinitions = definitionsFor('boss-work-speed');
+    const scalarOne = activateInOrder(scalarDefinitions, [
+      'board-observer',
+      'secretary-help',
+      'team-building',
+    ]).modifiers();
+    const scalarTwo = activateInOrder(scalarDefinitions, [
+      'team-building',
+      'board-observer',
+      'secretary-help',
+    ]).modifiers();
+    expect(scalarOne).toEqual(scalarTwo);
+    expect(scalarOne.bossWorkSpeed).toBe(Number.MAX_VALUE);
+
+    const conditionalDefinitions = definitionsFor('avoidance-chance');
+    const conditionalOne = activateInOrder(conditionalDefinitions, [
+      'board-observer',
+      'secretary-help',
+      'team-building',
+    ]).modifiers();
+    const conditionalTwo = activateInOrder(conditionalDefinitions, [
+      'team-building',
+      'board-observer',
+      'secretary-help',
+    ]).modifiers();
+    expect(conditionalOne).toEqual(conditionalTwo);
+    expect(conditionalOne.conditionalAvoidanceChanceMultipliers.map((item) => item.sourceEventId))
+      .toEqual(orderedIds);
+    const task8Product = conditionalOne.conditionalAvoidanceChanceMultipliers.reduce(
+      (product, item) => product * item.multiplier,
+      conditionalOne.avoidanceChanceMultiplier,
+    );
+    expect(task8Product).toBe(Number.MAX_VALUE);
+  });
+
   it('rejects unrepresentable activation expiries before any state or used-ID mutation', () => {
     const ordinary = system();
     const ordinaryBefore = ordinary.snapshot();
@@ -524,6 +616,60 @@ describe('EventSystem snapshots and configuration validation', () => {
     const secretaryBefore = secretary.snapshot();
     expect(() => secretary.activate('secretary-help', Number.MAX_VALUE)).toThrow('expiry');
     expect(secretary.snapshot()).toEqual(secretaryBefore);
+  });
+
+  it('rejects rounded expiry overshoot before mutation and only emits restorable snapshots', () => {
+    const hugeNow = 2 ** 60;
+    const secretary = system();
+    const secretaryBefore = secretary.snapshot();
+    expect(() => secretary.activate('secretary-help', hugeNow)).toThrow('expiry');
+    expect(secretary.snapshot()).toEqual(secretaryBefore);
+    expect(() => secretary.activate('secretary-help', 100)).not.toThrow();
+    const saved = secretary.snapshot();
+    const restored = system();
+    expect(() => restored.restore(saved)).not.toThrow();
+    expect(restored.snapshot()).toEqual(saved);
+
+    const ordinary = system();
+    const ordinaryBefore = ordinary.snapshot();
+    expect(() => ordinary.activate('board-observer', hugeNow)).toThrow('expiry');
+    expect(ordinary.snapshot()).toEqual(ordinaryBefore);
+    expect(() => ordinary.activate('board-observer', 100)).not.toThrow();
+  });
+
+  it('keeps manual and automatic ignore atomic on rounded active expiry', () => {
+    const hugeNow = 2 ** 60;
+    const exactChoiceDuration = 65_536;
+    const definitions = EVENT_DEFINITIONS.map((definition) => (
+      definition.id === 'secretary-help'
+        ? { ...definition, choiceDurationMs: exactChoiceDuration }
+        : definition
+    ));
+
+    const manual = new EventSystem(new StubRandom([]), definitions);
+    manual.activate('secretary-help', hugeNow);
+    const manualBefore = manual.snapshot();
+    expect(() => manual.choose('secretary-help', 'ignore', hugeNow)).toThrow('expiry');
+    expect(manual.snapshot()).toEqual(manualBefore);
+    expect(() => manual.choose('secretary-help', 'report', hugeNow)).not.toThrow();
+
+    const automatic = new EventSystem(new StubRandom([]), definitions);
+    automatic.activate('secretary-help', hugeNow);
+    const automaticBefore = automatic.snapshot();
+    expect(() => automatic.tick(hugeNow + exactChoiceDuration)).toThrow('expiry');
+    expect(automatic.snapshot()).toEqual(automaticBefore);
+    expect(() => automatic.choose('secretary-help', 'report', hugeNow)).not.toThrow();
+
+    const binding = system();
+    binding.restore({
+      activeEvents: [],
+      usedEventIds: ['secretary-help'],
+      pendingEventChoice: { id: 'secretary-help', remainingMs: 5_000 },
+    });
+    const bindingBefore = binding.snapshot();
+    expect(() => binding.tick(hugeNow)).toThrow('expiry');
+    expect(binding.snapshot()).toEqual(bindingBefore);
+    expect(() => binding.tick(0)).not.toThrow();
   });
 
   it('keeps restored pending state and time anchor atomic when expiry arithmetic fails', () => {
