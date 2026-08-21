@@ -96,6 +96,31 @@ describe('TaskSystem', () => {
     expect(tasks.expire(1080)).toEqual([]);
   });
 
+  it('can terminally clear every unresolved task for one-shot day settlement', () => {
+    const tasks = createSystem();
+    const offered = tasks.offer('admin-coffee', 540).instanceId;
+    const employee = tasks.offer('finance-invoice', 540).instanceId;
+    const boss = tasks.offer('sales-complaint', 540).instanceId;
+    const completed = tasks.offer('dev-payment-error', 540).instanceId;
+    tasks.assign(employee, 'employee', 541);
+    tasks.assign(boss, 'boss', 541);
+    tasks.assign(completed, 'employee', 541);
+    tasks.complete(completed, true, 542);
+
+    expect(tasks.expireAll().map((item) => item.payload.instanceId)).toEqual([
+      offered,
+      employee,
+      boss,
+    ]);
+    expect(tasks.expireAll()).toEqual([]);
+    expect(tasks.snapshot().tasks.map((task) => task.status)).toEqual([
+      'expired',
+      'expired',
+      'expired',
+      'completed',
+    ]);
+  });
+
   it('returns detached frozen snapshots', () => {
     const tasks = createSystem();
     const id = tasks.offer('admin-coffee', 540).instanceId;

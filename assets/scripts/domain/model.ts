@@ -43,6 +43,22 @@ export interface MeterSnapshot {
   trust: number;
 }
 
+export interface GameStatistics {
+  bossCompleted: number;
+  bossWorkload: number;
+  totalWorkload: number;
+  bossWorkMs: number;
+  meetings: number;
+  usefulMeetings: number;
+  dumpAttempts: number;
+  dumpSuccesses: number;
+  outsources: number;
+  outsourceCost: number;
+  simplePhraseCount: number;
+  unresolvedUrgent: number;
+  counteredAvoidances: number;
+}
+
 export interface DomainEvent {
   type: string;
   payload: Readonly<Record<string, unknown>>;
@@ -56,6 +72,8 @@ export interface GameSnapshot {
   phase: 'intro' | 'playing' | 'tutorial-paused' | 'paused' | 'result';
   elapsedRealMs: number;
   nextTaskSpawnMs: number;
+  nextEventTriggerIndex: number;
+  pendingVipDefinitionId?: string;
   meters: MeterSnapshot;
   permissions: number;
   tasks: readonly TaskInstance[];
@@ -68,9 +86,10 @@ export interface GameSnapshot {
     avoidanceLegitimate?: boolean;
     remainingWorkMs: number;
     warningRemainingMs: number;
+    nonWorkDelayRemainingMs?: number;
   };
   activeEvents: readonly { id: string; expiresAtMs: number }[];
   usedEventIds: readonly string[];
   pendingEventChoice?: { id: 'secretary-help'; remainingMs: number };
-  stats: Readonly<Record<string, number>>;
+  stats: Readonly<GameStatistics>;
 }

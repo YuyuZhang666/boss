@@ -350,6 +350,49 @@ describe('BossAI state machine', () => {
     expect(boss.snapshot()).not.toHaveProperty('taskInstanceId');
   });
 
+  it('keeps warning and non-work delay on real time while speeding only productive work', () => {
+    const boss = warningBoss(task({ bossFit: 4, workload: 3, expertise: 4 }), 0);
+    boss.tick(750, 99);
+    expect(boss.snapshot().warningRemainingMs).toBe(750);
+    expect(boss.workedRealMsLastTick).toBe(0);
+
+    boss.tick(750, 99);
+    expect(boss.snapshot()).toMatchObject({
+      state: 'working',
+      remainingWorkMs: 9_500,
+      nonWorkDelayRemainingMs: 2_000,
+    });
+    boss.tick(1_000, 99);
+    expect(boss.snapshot()).toMatchObject({
+      remainingWorkMs: 8_500,
+      nonWorkDelayRemainingMs: 1_000,
+    });
+    expect(boss.workedRealMsLastTick).toBe(0);
+    boss.tick(1_000, 99);
+    expect(boss.snapshot()).not.toHaveProperty('nonWorkDelayRemainingMs');
+    expect(boss.workedRealMsLastTick).toBe(0);
+
+    boss.tick(75, 100);
+    expect(boss.snapshot().state).toBe('idle');
+    expect(boss.workedRealMsLastTick).toBe(75);
+  });
+
+  it('cancels only the matching active task and clears every timer', () => {
+    const boss = warningBoss(task(), 0.2, 'cancel-me');
+    const before = boss.snapshot();
+    expect(boss.cancel('someone-else')).toEqual([]);
+    expect(boss.snapshot()).toEqual(before);
+    expect(boss.cancel('cancel-me').map((item) => item.type)).toEqual([
+      'boss-task-cancelled',
+      'boss-state-changed',
+    ]);
+    expect(boss.snapshot()).toEqual({
+      state: 'idle',
+      remainingWorkMs: 0,
+      warningRemainingMs: 0,
+    });
+  });
+
   it('treats negative delta as no progress and rejects non-finite delta atomically', () => {
     const boss = new BossAI(new StubRandom([0.99]));
     boss.accept('time-1', task(), 0, DEFAULT_CONTEXT);

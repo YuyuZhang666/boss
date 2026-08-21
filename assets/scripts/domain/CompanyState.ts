@@ -8,7 +8,7 @@ const METER_KEYS = Object.freeze([
 ] as const);
 const METER_KEY_SET: ReadonlySet<string> = new Set(METER_KEYS);
 const DEFAULT_METERS: Readonly<MeterSnapshot> = Object.freeze({
-  company: 70,
+  company: 73,
   rectification: 0,
   face: 65,
   trust: 50,

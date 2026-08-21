@@ -69,7 +69,7 @@ describe('day content', () => {
       {
         id: 'day-3',
         difficulty: 3,
-        spawnEveryMs: 10_000,
+        spawnEveryMs: 9_000,
         goal: { companyAtLeast: 50, rectificationAtLeast: 70 },
       },
     ]);

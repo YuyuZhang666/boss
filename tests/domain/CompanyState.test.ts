@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { CompanyState } from '../../assets/scripts/domain/CompanyState';
 
 const APPROVED_METERS = Object.freeze({
-  company: 70,
+  company: 73,
   rectification: 0,
   face: 65,
   trust: 50,
@@ -30,7 +30,7 @@ describe('CompanyState', () => {
 
     expect(events.map((event) => event.type)).toEqual(['meter-changed', 'meter-changed']);
     expect(events.map((event) => event.payload)).toEqual([
-      { key: 'company', previous: 70, current: 65, delta: -5 },
+      { key: 'company', previous: 73, current: 68, delta: -5 },
       { key: 'trust', previous: 50, current: 57, delta: 7 },
     ]);
     expect(state.failed).toBe(false);

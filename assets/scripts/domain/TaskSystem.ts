@@ -134,6 +134,20 @@ export class TaskSystem {
     return Object.freeze(events);
   }
 
+  expireAll(): readonly DomainEvent[] {
+    const events: DomainEvent[] = [];
+    for (const task of this.tasks) {
+      if (!isTerminal(task.status)) {
+        task.status = 'expired';
+        events.push(event('task-expired', {
+          instanceId: task.instanceId,
+          definitionId: task.definitionId,
+        }));
+      }
+    }
+    return Object.freeze(events);
+  }
+
   snapshot(): Readonly<TaskSystemSnapshot> {
     const tasks = Object.freeze(this.tasks.map((task) => freezeTask(task)));
     return Object.freeze({ tasks, sequence: this.sequence });

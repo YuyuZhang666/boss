@@ -14,6 +14,7 @@ const MIN_WARNING_MS = 1_200;
 const MAX_WARNING_MS = 1_800;
 const WORKLOAD_DURATION_MS = 2_500;
 const MEETING_DELAY_MS = 3_000;
+const LEGITIMATE_MEETING_DELAY_MS = 2_000;
 const STRATEGIC_UPGRADE_DELAY_MS = 4_000;
 
 const BOSS_STATES: ReadonlySet<BossState> = new Set(['idle', 'working', 'warning']);
@@ -172,6 +173,8 @@ export class BossAI {
   private currentAvoidanceLegitimate: boolean | undefined;
   private currentRemainingWorkMs = 0;
   private currentWarningRemainingMs = 0;
+  private currentNonWorkDelayRemainingMs = 0;
+  private latestWorkedRealMs = 0;
 
   constructor(private readonly random: RandomSource) {
     if (typeof random !== 'object' || random === null) {
@@ -232,8 +235,16 @@ export class BossAI {
     return freezeEvents(events);
   }
 
-  tick(deltaMs: number): DomainEvent[] {
+  get workedRealMsLastTick(): number {
+    return this.latestWorkedRealMs;
+  }
+
+  tick(deltaMs: number, workSpeed = 1): DomainEvent[] {
     if (!isFiniteNumber(deltaMs)) throw new Error('deltaMs must be finite');
+    if (!isFiniteNumber(workSpeed) || workSpeed < 0) {
+      throw new Error('workSpeed must be a finite nonnegative number');
+    }
+    this.latestWorkedRealMs = 0;
     if (deltaMs <= 0) return EMPTY_EVENTS;
 
     let remainingDeltaMs = deltaMs;
@@ -259,9 +270,11 @@ export class BossAI {
         }));
 
         if (avoidance === 'meeting' || avoidance === 'strategic-upgrade') {
-          this.currentRemainingWorkMs += avoidance === 'meeting'
-            ? MEETING_DELAY_MS
+          const delay = avoidance === 'meeting'
+            ? (legitimate ? LEGITIMATE_MEETING_DELAY_MS : MEETING_DELAY_MS)
             : STRATEGIC_UPGRADE_DELAY_MS;
+          this.currentRemainingWorkMs += delay;
+          this.currentNonWorkDelayRemainingMs += delay;
           this.clearWarning();
           this.transitionTo('working', events);
         } else {
@@ -270,13 +283,25 @@ export class BossAI {
         continue;
       }
 
-      if (remainingDeltaMs < this.currentRemainingWorkMs) {
-        this.currentRemainingWorkMs -= remainingDeltaMs;
+      if (this.currentNonWorkDelayRemainingMs > 0) {
+        const consumedDelay = Math.min(remainingDeltaMs, this.currentNonWorkDelayRemainingMs);
+        this.currentNonWorkDelayRemainingMs -= consumedDelay;
+        this.currentRemainingWorkMs -= consumedDelay;
+        remainingDeltaMs -= consumedDelay;
+        continue;
+      }
+
+      if (workSpeed === 0) break;
+      const realMsToComplete = this.currentRemainingWorkMs / workSpeed;
+      if (remainingDeltaMs < realMsToComplete) {
+        this.currentRemainingWorkMs -= remainingDeltaMs * workSpeed;
+        this.latestWorkedRealMs += remainingDeltaMs;
         remainingDeltaMs = 0;
         continue;
       }
 
-      remainingDeltaMs -= this.currentRemainingWorkMs;
+      remainingDeltaMs -= realMsToComplete;
+      this.latestWorkedRealMs += realMsToComplete;
       this.currentRemainingWorkMs = 0;
       events.push(event('boss-task-completed', {
         taskInstanceId: this.currentTaskInstanceId!,
@@ -285,6 +310,16 @@ export class BossAI {
     }
 
     return events.length === 0 ? EMPTY_EVENTS : freezeEvents(events);
+  }
+
+  cancel(instanceId: string): DomainEvent[] {
+    if (!isPrimitiveNonEmptyString(instanceId)) throw new Error('invalid task instance ID');
+    if (this.currentState === 'idle' || this.currentTaskInstanceId !== instanceId) {
+      return EMPTY_EVENTS;
+    }
+    const events = [event('boss-task-cancelled', { taskInstanceId: instanceId })];
+    this.transitionTo('idle', events);
+    return freezeEvents(events);
   }
 
   counter(ruleId: RuleId): DomainEvent[] {
@@ -323,6 +358,9 @@ export class BossAI {
       snapshot.avoidance = this.currentAvoidance;
       snapshot.avoidanceLegitimate = this.currentAvoidanceLegitimate;
     }
+    if (this.currentNonWorkDelayRemainingMs > 0) {
+      snapshot.nonWorkDelayRemainingMs = this.currentNonWorkDelayRemainingMs;
+    }
     return Object.freeze(snapshot);
   }
 
@@ -335,10 +373,12 @@ export class BossAI {
     const avoidanceLegitimate = snapshot.avoidanceLegitimate;
     const remainingWorkMs = snapshot.remainingWorkMs;
     const warningRemainingMs = snapshot.warningRemainingMs;
+    const nonWorkDelayRemainingMs = snapshot.nonWorkDelayRemainingMs ?? 0;
 
     if (typeof state !== 'string' || !BOSS_STATES.has(state)) invalidSnapshot();
     if (!isFiniteNumber(remainingWorkMs) || remainingWorkMs < 0) invalidSnapshot();
     if (!isFiniteNumber(warningRemainingMs) || warningRemainingMs < 0) invalidSnapshot();
+    if (!isFiniteNumber(nonWorkDelayRemainingMs) || nonWorkDelayRemainingMs < 0) invalidSnapshot();
 
     if (state === 'idle') {
       if (
@@ -347,6 +387,7 @@ export class BossAI {
         || avoidanceLegitimate !== undefined
         || remainingWorkMs !== 0
         || warningRemainingMs !== 0
+        || nonWorkDelayRemainingMs !== 0
       ) invalidSnapshot();
     } else if (state === 'working') {
       if (
@@ -355,6 +396,7 @@ export class BossAI {
         || avoidanceLegitimate !== undefined
         || remainingWorkMs <= 0
         || warningRemainingMs !== 0
+        || nonWorkDelayRemainingMs > remainingWorkMs
       ) invalidSnapshot();
     } else if (
       !isPrimitiveNonEmptyString(taskInstanceId)
@@ -365,6 +407,7 @@ export class BossAI {
       || remainingWorkMs <= 0
       || warningRemainingMs <= 0
       || warningRemainingMs > MAX_WARNING_MS
+      || nonWorkDelayRemainingMs !== 0
     ) {
       invalidSnapshot();
     }
@@ -375,6 +418,8 @@ export class BossAI {
     this.currentAvoidanceLegitimate = avoidanceLegitimate;
     this.currentRemainingWorkMs = remainingWorkMs;
     this.currentWarningRemainingMs = warningRemainingMs;
+    this.currentNonWorkDelayRemainingMs = nonWorkDelayRemainingMs;
+    this.latestWorkedRealMs = 0;
   }
 
   private clearWarning(): void {
@@ -397,6 +442,7 @@ export class BossAI {
       this.currentAvoidanceLegitimate = undefined;
       this.currentRemainingWorkMs = 0;
       this.currentWarningRemainingMs = 0;
+      this.currentNonWorkDelayRemainingMs = 0;
     }
   }
 }
