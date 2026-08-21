@@ -50,7 +50,8 @@ export class TaskSystem {
       if (byId.has(definition.id)) {
         throw new Error(`duplicate task definition: ${definition.id}`);
       }
-      byId.set(definition.id, definition);
+      const detached = Object.freeze({ ...definition });
+      byId.set(detached.id, detached);
     }
     this.definitions = byId;
   }
@@ -59,6 +60,7 @@ export class TaskSystem {
     const definition = this.definitions.get(definitionId);
     if (!definition) throw new Error(`unknown task definition: ${definitionId}`);
     if (this.countStatus('offered') >= OFFER_CAPACITY) throw new Error('offer queue is full');
+    if (this.sequence >= Number.MAX_SAFE_INTEGER) throw new Error('task sequence is exhausted');
 
     this.sequence += 1;
     const task: TaskInstance = {
@@ -139,7 +141,7 @@ export class TaskSystem {
 
   restore(snapshot: TaskSystemSnapshot): void {
     if (!snapshot || !Array.isArray(snapshot.tasks)) throw new Error('invalid task snapshot');
-    if (!Number.isInteger(snapshot.sequence) || snapshot.sequence < 0) {
+    if (!Number.isSafeInteger(snapshot.sequence) || snapshot.sequence < 0) {
       throw new Error('invalid task sequence');
     }
 

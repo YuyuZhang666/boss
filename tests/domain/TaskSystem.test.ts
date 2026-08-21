@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { TaskInstance } from '../../assets/scripts/domain/model';
+import type { TaskDefinition, TaskInstance } from '../../assets/scripts/domain/model';
 import { TaskSystem } from '../../assets/scripts/domain/TaskSystem';
 import { TASK_DEFINITIONS } from '../../assets/scripts/domain/content/tasks';
 
@@ -139,5 +139,42 @@ describe('TaskSystem', () => {
       expect(() => tasks.restore(value as never)).toThrow();
       expect(tasks.snapshot()).toEqual(before);
     }
+  });
+
+  it('rejects unsafe restore sequences atomically', () => {
+    const tasks = createSystem();
+    tasks.offer('admin-coffee', 540);
+    const before = tasks.snapshot();
+
+    expect(() => tasks.restore({
+      tasks: before.tasks,
+      sequence: Number.MAX_SAFE_INTEGER + 1,
+    })).toThrow('invalid task sequence');
+    expect(tasks.snapshot()).toEqual(before);
+  });
+
+  it('rejects offers before the instance sequence would become unsafe', () => {
+    const tasks = createSystem();
+    tasks.restore({ tasks: [], sequence: Number.MAX_SAFE_INTEGER - 1 });
+
+    expect(tasks.offer('admin-coffee', 540).instanceId).toBe(
+      `admin-coffee-${Number.MAX_SAFE_INTEGER}`,
+    );
+    const beforeRejectedOffer = tasks.snapshot();
+    expect(() => tasks.offer('dev-button-color', 541)).toThrow('task sequence is exhausted');
+    expect(tasks.snapshot()).toEqual(beforeRejectedOffer);
+  });
+
+  it('detaches constructor definitions from retained caller references', () => {
+    const definitions: TaskDefinition[] = [{ ...TASK_DEFINITIONS[0] }];
+    const tasks = new TaskSystem(definitions);
+
+    definitions[0].deadlineMinutes = 999;
+    definitions[0].title = '调用方篡改后的标题';
+
+    expect(tasks.offer(definitions[0].id, 540)).toMatchObject({
+      definitionId: 'dev-payment-error',
+      deadlineAtMinute: 585,
+    });
   });
 });
