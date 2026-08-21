@@ -53,11 +53,14 @@ export class RuleSystem {
   }
 
   use(ruleId: RuleId, avoidance: AvoidanceType): RuleUseResult {
-    if (!Object.prototype.hasOwnProperty.call(RULE_DEFINITIONS, ruleId)) {
-      throw new Error(`unknown rule: ${String(ruleId)}`);
+    if (
+      typeof ruleId !== 'string'
+      || !Object.prototype.hasOwnProperty.call(RULE_DEFINITIONS, ruleId)
+    ) {
+      throw new Error('unknown rule');
     }
-    if (!AVOIDANCE_TYPES.has(avoidance)) {
-      throw new Error(`unknown avoidance: ${String(avoidance)}`);
+    if (typeof avoidance !== 'string' || !AVOIDANCE_TYPES.has(avoidance)) {
+      throw new Error('unknown avoidance');
     }
 
     const definition = RULE_DEFINITIONS[ruleId];

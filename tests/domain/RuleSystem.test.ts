@@ -92,6 +92,45 @@ describe('RuleSystem', () => {
     expect(rules.remaining).toBe(5);
   });
 
+  it('rejects object-coercible and non-string rule IDs without charging', () => {
+    const rules = new RuleSystem(5);
+    const invalidRuleIds = [
+      new String('original-request'),
+      { toString: () => 'original-request' },
+      { toString: () => { throw new Error('untrusted coercion ran'); } },
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      1.5,
+      -1,
+    ];
+
+    for (const invalid of invalidRuleIds) {
+      expect(() => rules.use(invalid as unknown as RuleId, 'meeting')).toThrow('unknown rule');
+      expect(rules.remaining).toBe(5);
+    }
+  });
+
+  it('rejects object-coercible and non-string avoidances without charging', () => {
+    const rules = new RuleSystem(5);
+    const invalidAvoidances = [
+      new String('meeting'),
+      { toString: () => 'meeting' },
+      { toString: () => { throw new Error('untrusted coercion ran'); } },
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      1.5,
+      -1,
+    ];
+
+    for (const invalid of invalidAvoidances) {
+      expect(() => rules.use(
+        'original-request',
+        invalid as unknown as AvoidanceType,
+      )).toThrow('unknown avoidance');
+      expect(rules.remaining).toBe(5);
+    }
+  });
+
   it('clamps valid restored balances and rejects invalid values atomically', () => {
     const rules = new RuleSystem();
 
