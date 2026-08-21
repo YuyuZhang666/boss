@@ -1,0 +1,521 @@
+import type { DomainEvent, GameSnapshot, RandomSource } from './model';
+import type {
+  EventDefinition,
+  EventEffect,
+  EventId,
+} from './content/events';
+
+const EVENT_IDS: ReadonlySet<string> = new Set([
+  'board-observer',
+  'vip-visit',
+  'secretary-help',
+  'team-building',
+  'golf-invite',
+  'coffee-broken',
+]);
+const CHOICES: ReadonlySet<string> = new Set(['ignore', 'report']);
+const EMPTY_EVENTS = Object.freeze([]) as unknown as DomainEvent[];
+
+interface ActiveEvent {
+  readonly id: EventId;
+  readonly expiresAtMs: number;
+}
+
+interface PendingChoice {
+  readonly id: 'secretary-help';
+  remainingMs: number;
+  expiresAtMs?: number;
+}
+
+export interface ConditionalAvoidanceChanceMultiplier {
+  readonly sourceEventId: EventId;
+  readonly minMinuteOfDay: number;
+  readonly multiplier: number;
+}
+
+export interface EventModifiers {
+  readonly bossWorkSpeed: number;
+  readonly employeeWorkSpeed: number;
+  readonly avoidanceChanceMultiplier: number;
+  readonly trustGainMultiplier: number;
+  readonly conditionalAvoidanceChanceMultipliers:
+    readonly ConditionalAvoidanceChanceMultiplier[];
+}
+
+export interface EventSystemSnapshot {
+  readonly activeEvents: GameSnapshot['activeEvents'];
+  readonly usedEventIds: GameSnapshot['usedEventIds'];
+  readonly pendingEventChoice?: GameSnapshot['pendingEventChoice'];
+}
+
+function isRecord(value: unknown): value is Record<PropertyKey, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isFiniteNonnegativeNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function isPrimitiveNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function hasOnlyKeys(value: object, allowed: readonly string[]): boolean {
+  const allowedSet = new Set(allowed);
+  return Reflect.ownKeys(value).every(
+    (key) => typeof key === 'string' && allowedSet.has(key),
+  );
+}
+
+function invalidDefinition(): never {
+  throw new Error('invalid event definition');
+}
+
+function cloneEffect(value: unknown): EventEffect {
+  if (!isRecord(value) || typeof value.type !== 'string') invalidDefinition();
+
+  if (value.type === 'request-task-offer') {
+    if (
+      !hasOnlyKeys(value, ['type', 'definitionId'])
+      || !isPrimitiveNonEmptyString(value.definitionId)
+    ) invalidDefinition();
+    return Object.freeze({ type: value.type, definitionId: value.definitionId });
+  }
+
+  if (
+    value.type !== 'boss-work-speed'
+    && value.type !== 'employee-work-speed'
+    && value.type !== 'avoidance-chance'
+    && value.type !== 'trust-gain'
+  ) invalidDefinition();
+  if (
+    typeof value.multiplier !== 'number'
+    || !Number.isFinite(value.multiplier)
+    || value.multiplier < 0
+  ) invalidDefinition();
+
+  if (value.type === 'avoidance-chance') {
+    if (!hasOnlyKeys(value, ['type', 'multiplier', 'minMinuteOfDay'])) invalidDefinition();
+    const minMinuteOfDay = value.minMinuteOfDay;
+    if (
+      minMinuteOfDay !== undefined
+      && (!Number.isSafeInteger(minMinuteOfDay) || (minMinuteOfDay as number) < 0 || (minMinuteOfDay as number) > 1_440)
+    ) invalidDefinition();
+    return Object.freeze({
+      type: value.type,
+      multiplier: value.multiplier,
+      ...(minMinuteOfDay === undefined ? {} : { minMinuteOfDay: minMinuteOfDay as number }),
+    });
+  }
+
+  if (!hasOnlyKeys(value, ['type', 'multiplier'])) invalidDefinition();
+  return Object.freeze({ type: value.type, multiplier: value.multiplier }) as EventEffect;
+}
+
+function cloneDefinitions(definitions: unknown): readonly EventDefinition[] {
+  if (!Array.isArray(definitions) || definitions.length === 0) invalidDefinition();
+
+  const ids = new Set<string>();
+  const result: EventDefinition[] = [];
+  for (const candidate of definitions) {
+    if (
+      !isRecord(candidate)
+      || !hasOnlyKeys(candidate, ['id', 'durationMs', 'effects', 'choiceDurationMs'])
+      || !isPrimitiveNonEmptyString(candidate.id)
+      || !EVENT_IDS.has(candidate.id)
+      || ids.has(candidate.id)
+      || !Number.isSafeInteger(candidate.durationMs)
+      || (candidate.durationMs as number) < 0
+      || !Array.isArray(candidate.effects)
+      || candidate.effects.length === 0
+    ) invalidDefinition();
+
+    const id = candidate.id as EventId;
+    const durationMs = candidate.durationMs as number;
+    const effects = Object.freeze(candidate.effects.map(cloneEffect));
+    const choiceDurationMs = candidate.choiceDurationMs;
+    const hasRequestEffect = effects.some((effect) => effect.type === 'request-task-offer');
+
+    if (id === 'vip-visit') {
+      if (
+        durationMs !== 0
+        || choiceDurationMs !== undefined
+        || effects.length !== 1
+        || !hasRequestEffect
+      ) invalidDefinition();
+    } else if (id === 'secretary-help') {
+      if (
+        durationMs <= 0
+        || !Number.isSafeInteger(choiceDurationMs)
+        || (choiceDurationMs as number) <= 0
+        || hasRequestEffect
+      ) invalidDefinition();
+    } else if (durationMs <= 0 || choiceDurationMs !== undefined || hasRequestEffect) {
+      invalidDefinition();
+    }
+
+    ids.add(id);
+    result.push(Object.freeze({
+      id,
+      durationMs,
+      effects,
+      ...(choiceDurationMs === undefined ? {} : { choiceDurationMs: choiceDurationMs as number }),
+    }));
+  }
+  return Object.freeze(result);
+}
+
+function domainEvent(type: string, payload: Record<string, unknown>): DomainEvent {
+  return Object.freeze({ type, payload: Object.freeze({ ...payload }) });
+}
+
+function freezeEvents(events: DomainEvent[]): DomainEvent[] {
+  return events.length === 0
+    ? EMPTY_EVENTS
+    : Object.freeze(events) as unknown as DomainEvent[];
+}
+
+function validateNow(nowMs: unknown): asserts nowMs is number {
+  if (!isFiniteNonnegativeNumber(nowMs)) throw new Error('invalid event time');
+}
+
+function invalidSnapshot(): never {
+  throw new Error('invalid event snapshot');
+}
+
+export class EventSystem {
+  private readonly definitions: readonly EventDefinition[];
+  private readonly definitionsById: ReadonlyMap<EventId, EventDefinition>;
+  private readonly definitionOrder: ReadonlyMap<EventId, number>;
+  private activeEvents: ActiveEvent[] = [];
+  private usedEventIds = new Set<EventId>();
+  private pendingChoice: PendingChoice | undefined;
+  private lastNowMs: number | undefined;
+
+  constructor(random: RandomSource, definitions: readonly EventDefinition[]) {
+    if (
+      typeof random !== 'object'
+      || random === null
+      || typeof random.next !== 'function'
+      || typeof random.int !== 'function'
+    ) {
+      throw new Error('invalid random source');
+    }
+    this.random = random;
+    this.definitions = cloneDefinitions(definitions);
+    this.definitionsById = new Map(this.definitions.map((definition) => [definition.id, definition]));
+    this.definitionOrder = new Map(this.definitions.map((definition, index) => [definition.id, index]));
+  }
+
+  private readonly random: RandomSource;
+
+  draw(count: number): EventId[] {
+    if (!Number.isSafeInteger(count) || count < 0) throw new Error('invalid draw count');
+    const candidates = this.definitions
+      .filter((definition) => !this.usedEventIds.has(definition.id))
+      .map((definition) => definition.id);
+    if (count > candidates.length) throw new Error('not enough available events');
+
+    const drawn: EventId[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const selectedIndex = this.random.int(0, candidates.length);
+      if (
+        !Number.isSafeInteger(selectedIndex)
+        || selectedIndex < 0
+        || selectedIndex >= candidates.length
+      ) {
+        throw new Error('random source returned an invalid event index');
+      }
+      drawn.push(candidates.splice(selectedIndex, 1)[0]);
+    }
+    return Object.freeze(drawn) as unknown as EventId[];
+  }
+
+  activate(id: string, nowMs: number): DomainEvent[] {
+    const definition = this.requireDefinition(id);
+    validateNow(nowMs);
+    this.requireMonotonic(nowMs);
+    if (this.usedEventIds.has(definition.id)) throw new Error('event already used');
+
+    if (this.pendingChoice !== undefined) {
+      if (
+        this.pendingChoice.expiresAtMs === undefined
+        || nowMs < this.pendingChoice.expiresAtMs
+      ) {
+        throw new Error('an event choice is pending');
+      }
+    }
+
+    const events = this.advanceTo(nowMs);
+    this.usedEventIds.add(definition.id);
+
+    if (definition.id === 'vip-visit') {
+      const request = definition.effects[0];
+      if (request.type !== 'request-task-offer') invalidDefinition();
+      events.push(domainEvent('event-task-offer-requested', {
+        eventId: definition.id,
+        definitionId: request.definitionId,
+      }));
+      return freezeEvents(events);
+    }
+
+    if (definition.id === 'secretary-help') {
+      const choiceDurationMs = definition.choiceDurationMs!;
+      this.pendingChoice = {
+        id: definition.id,
+        remainingMs: choiceDurationMs,
+        expiresAtMs: nowMs + choiceDurationMs,
+      };
+      events.push(domainEvent('event-choice-pending', {
+        eventId: definition.id,
+        expiresAtMs: nowMs + choiceDurationMs,
+        choiceDurationMs,
+      }));
+      return freezeEvents(events);
+    }
+
+    this.startActive(definition, nowMs, events);
+    return freezeEvents(events);
+  }
+
+  choose(id: string, choice: 'ignore' | 'report', nowMs: number): DomainEvent[] {
+    if (!isPrimitiveNonEmptyString(id) || id !== 'secretary-help') {
+      throw new Error('invalid pending choice event ID');
+    }
+    if (typeof choice !== 'string' || !CHOICES.has(choice)) throw new Error('invalid event choice');
+    validateNow(nowMs);
+    this.requireMonotonic(nowMs);
+    if (this.pendingChoice === undefined || this.pendingChoice.id !== id) {
+      throw new Error('no matching pending choice');
+    }
+
+    const events = this.advanceTo(nowMs);
+    if (this.pendingChoice === undefined) return freezeEvents(events);
+
+    this.pendingChoice = undefined;
+    events.push(domainEvent('event-choice-resolved', {
+      eventId: id,
+      choice,
+      automatic: false,
+      resolvedAtMs: nowMs,
+    }));
+    if (choice === 'ignore') {
+      this.startActive(this.definitionsById.get(id)!, nowMs, events);
+    }
+    return freezeEvents(events);
+  }
+
+  tick(nowMs: number): DomainEvent[] {
+    validateNow(nowMs);
+    this.requireMonotonic(nowMs);
+    return freezeEvents(this.advanceTo(nowMs));
+  }
+
+  modifiers(): Readonly<EventModifiers> {
+    let bossWorkSpeed = 1;
+    let employeeWorkSpeed = 1;
+    let avoidanceChanceMultiplier = 1;
+    let trustGainMultiplier = 1;
+    const conditional: ConditionalAvoidanceChanceMultiplier[] = [];
+
+    for (const active of this.activeEvents) {
+      const definition = this.definitionsById.get(active.id)!;
+      for (const effect of definition.effects) {
+        switch (effect.type) {
+          case 'boss-work-speed':
+            bossWorkSpeed *= effect.multiplier;
+            break;
+          case 'employee-work-speed':
+            employeeWorkSpeed *= effect.multiplier;
+            break;
+          case 'trust-gain':
+            trustGainMultiplier *= effect.multiplier;
+            break;
+          case 'avoidance-chance':
+            if (effect.minMinuteOfDay === undefined) {
+              avoidanceChanceMultiplier *= effect.multiplier;
+            } else {
+              conditional.push(Object.freeze({
+                sourceEventId: active.id,
+                minMinuteOfDay: effect.minMinuteOfDay,
+                multiplier: effect.multiplier,
+              }));
+            }
+            break;
+          case 'request-task-offer':
+            break;
+        }
+      }
+    }
+
+    return Object.freeze({
+      bossWorkSpeed,
+      employeeWorkSpeed,
+      avoidanceChanceMultiplier,
+      trustGainMultiplier,
+      conditionalAvoidanceChanceMultipliers: Object.freeze(conditional),
+    });
+  }
+
+  snapshot(): Readonly<EventSystemSnapshot> {
+    const activeEvents = Object.freeze(this.activeEvents.map((active) => Object.freeze({
+      id: active.id,
+      expiresAtMs: active.expiresAtMs,
+    })));
+    const usedEventIds = Object.freeze([...this.usedEventIds]);
+    const snapshot: {
+      activeEvents: typeof activeEvents;
+      usedEventIds: typeof usedEventIds;
+      pendingEventChoice?: Readonly<{ id: 'secretary-help'; remainingMs: number }>;
+    } = { activeEvents, usedEventIds };
+    if (this.pendingChoice !== undefined) {
+      const remainingMs = this.pendingChoice.expiresAtMs === undefined
+        ? this.pendingChoice.remainingMs
+        : Math.max(0, this.pendingChoice.expiresAtMs - this.lastNowMs!);
+      snapshot.pendingEventChoice = Object.freeze({
+        id: this.pendingChoice.id,
+        remainingMs,
+      });
+    }
+    return Object.freeze(snapshot);
+  }
+
+  restore(snapshot: EventSystemSnapshot): void {
+    if (!isRecord(snapshot)) invalidSnapshot();
+    const activeInput = snapshot.activeEvents;
+    const usedInput = snapshot.usedEventIds;
+    const pendingInput = snapshot.pendingEventChoice;
+    if (!Array.isArray(activeInput) || !Array.isArray(usedInput)) invalidSnapshot();
+
+    const nextUsed = new Set<EventId>();
+    for (const id of usedInput) {
+      if (
+        !isPrimitiveNonEmptyString(id)
+        || !this.definitionsById.has(id as EventId)
+        || nextUsed.has(id as EventId)
+      ) invalidSnapshot();
+      nextUsed.add(id as EventId);
+    }
+
+    const activeIds = new Set<EventId>();
+    const nextActive: ActiveEvent[] = [];
+    for (const active of activeInput) {
+      if (
+        !isRecord(active)
+        || !hasOnlyKeys(active, ['id', 'expiresAtMs'])
+        || !isPrimitiveNonEmptyString(active.id)
+        || !this.definitionsById.has(active.id as EventId)
+        || activeIds.has(active.id as EventId)
+        || !isFiniteNonnegativeNumber(active.expiresAtMs)
+      ) invalidSnapshot();
+      const id = active.id as EventId;
+      const definition = this.definitionsById.get(id)!;
+      if (definition.durationMs <= 0 || id === 'vip-visit' || !nextUsed.has(id)) invalidSnapshot();
+      activeIds.add(id);
+      nextActive.push({ id, expiresAtMs: active.expiresAtMs });
+    }
+
+    let nextPending: PendingChoice | undefined;
+    if (pendingInput !== undefined) {
+      if (
+        !isRecord(pendingInput)
+        || !hasOnlyKeys(pendingInput, ['id', 'remainingMs'])
+        || pendingInput.id !== 'secretary-help'
+        || !isFiniteNonnegativeNumber(pendingInput.remainingMs)
+        || pendingInput.remainingMs > 5_000
+        || !this.definitionsById.has('secretary-help')
+        || !nextUsed.has('secretary-help')
+        || activeIds.has('secretary-help')
+      ) invalidSnapshot();
+      nextPending = {
+        id: 'secretary-help',
+        remainingMs: pendingInput.remainingMs,
+      };
+    }
+
+    this.activeEvents = nextActive;
+    this.usedEventIds = nextUsed;
+    this.pendingChoice = nextPending;
+    this.lastNowMs = undefined;
+  }
+
+  private requireDefinition(id: unknown): EventDefinition {
+    if (!isPrimitiveNonEmptyString(id)) throw new Error('invalid event ID');
+    const definition = this.definitionsById.get(id as EventId);
+    if (definition === undefined) throw new Error('unknown event ID');
+    return definition;
+  }
+
+  private requireMonotonic(nowMs: number): void {
+    if (this.lastNowMs !== undefined && nowMs < this.lastNowMs) {
+      throw new Error('event time must be monotonic');
+    }
+  }
+
+  private startActive(
+    definition: EventDefinition,
+    activatedAtMs: number,
+    events: DomainEvent[],
+  ): void {
+    const expiresAtMs = activatedAtMs + definition.durationMs;
+    this.activeEvents.push({ id: definition.id, expiresAtMs });
+    events.push(domainEvent('event-activated', {
+      eventId: definition.id,
+      activatedAtMs,
+      expiresAtMs,
+    }));
+  }
+
+  private advanceTo(nowMs: number): DomainEvent[] {
+    const events: DomainEvent[] = [];
+    if (this.lastNowMs === undefined) {
+      if (this.pendingChoice !== undefined && this.pendingChoice.expiresAtMs === undefined) {
+        this.pendingChoice.expiresAtMs = nowMs + this.pendingChoice.remainingMs;
+      }
+      this.lastNowMs = nowMs;
+    }
+
+    while (true) {
+      let nextActiveExpiry = Number.POSITIVE_INFINITY;
+      for (const active of this.activeEvents) {
+        if (active.expiresAtMs < nextActiveExpiry) nextActiveExpiry = active.expiresAtMs;
+      }
+      const pendingExpiry = this.pendingChoice?.expiresAtMs ?? Number.POSITIVE_INFINITY;
+      const nextTime = Math.min(nextActiveExpiry, pendingExpiry);
+      if (nextTime > nowMs) break;
+
+      if (nextActiveExpiry <= pendingExpiry) {
+        const expired = this.activeEvents
+          .filter((active) => active.expiresAtMs === nextActiveExpiry)
+          .sort((left, right) => (
+            this.definitionOrder.get(left.id)! - this.definitionOrder.get(right.id)!
+          ));
+        const expiredIds = new Set(expired.map((active) => active.id));
+        this.activeEvents = this.activeEvents.filter((active) => !expiredIds.has(active.id));
+        for (const active of expired) {
+          events.push(domainEvent('event-expired', {
+            eventId: active.id,
+            expiredAtMs: active.expiresAtMs,
+          }));
+        }
+        continue;
+      }
+
+      const resolvedAtMs = pendingExpiry;
+      this.pendingChoice = undefined;
+      events.push(domainEvent('event-choice-resolved', {
+        eventId: 'secretary-help',
+        choice: 'ignore',
+        automatic: true,
+        resolvedAtMs,
+      }));
+      this.startActive(this.definitionsById.get('secretary-help')!, resolvedAtMs, events);
+    }
+
+    this.lastNowMs = nowMs;
+    if (this.pendingChoice !== undefined && this.pendingChoice.expiresAtMs !== undefined) {
+      this.pendingChoice.remainingMs = Math.max(0, this.pendingChoice.expiresAtMs - nowMs);
+    }
+    return events;
+  }
+}
